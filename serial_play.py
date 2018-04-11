@@ -15,7 +15,6 @@ import sys
 import time
 import serial
 
-
 # Serial transmission speed. Must match bps set in Serial.begin(bps)
 # at the 'vgm2149_vgm_player.ino' file.
 
@@ -39,7 +38,7 @@ class VGMReader(object):
                 chars.append(c.decode('utf-16'))
 
         # Seek to start of string data
-        self.__fd.seek (0x14 + self.__header['gd3_offset'] + 12)
+        self.__fd.seek (self.__header['gd3_offset'] + 12)
         self.__header['track_name'] = readcstr()
         self.__header['track_name_jpn'] = readcstr()
         self.__header['game_name'] = readcstr()
@@ -69,8 +68,18 @@ class VGMReader(object):
          d['loop_offset'],
          ) = struct.unpack(vgm_header, s)
 
+        # Store absolute offset of gd3_offset
+        d['gd3_offset'] += 0x14
+
+        # Read the relative offset to VGM data stream
+        self.__fd.seek(0x34)
+        s = self.__fd.read(4)
+        # Store absolute offset (0x34 + vgm_data_offset)
+        d['vgm_data_offset'] = struct.unpack('< I', s)[0] + 0x34
+
         # Seek to ay8910 clock info (absolute offset 0x74)
-        s = self.__fd.seek(0x74)
+        self.__fd.seek(0x74)
+        s = self.__fd.read (4)        
         d['clk_ay8910'] = struct.unpack('< I', s)[0]
         
         self.__header = d
@@ -80,12 +89,12 @@ class VGMReader(object):
         d['id'] = d['id'].decode()
 
         # Get version in string format 'maj.min'
-        d['str_version'] = __get_str_version()
+        d['str_version'] = self.__get_str_version()
 
         self.__parse_gd3_info()
 
     def __get_str_version (self):
-        high, low = divmod (self.__header['version'])
+        high, low = divmod (self.__header['version'], 0x100)
         str_version = format(high, 'x') + '.' + format(low, 'x')
         return str_version
 
@@ -96,14 +105,10 @@ class VGMReader(object):
         self.__data = [f for f in zip(*regs)]
 
     def __read_data(self):
-        if not self.__header['interleaved']:
-            raise Exception(
-                'Unsupported file format: Only interleaved data are supported')
-        self.__read_data_interleaved()
-
-    def __check_eof(self):
-        if self.__fd.read(4).decode() != 'End!':
-            print('*Warning* End! marker not found after frames')
+        print (self.__header['gd3_offset'] - self.__header['vgm_data_offset'])
+        cnt = self.__header['gd3_offset'] - self.__header['vgm_data_offset']
+        self.__fd.seek(self.__header['vgm_data_offset'])
+        self.__data = self.__fd.read(cnt)        
 
     def __init__(self, fd):
         self.__fd = fd
@@ -111,18 +116,32 @@ class VGMReader(object):
         self.__data = []
 
     def dump_header(self):
-        for k in ('id', 'check_string', 'nb_frames', 'song_attributes',
-                  'nb_digidrums', 'chip_clock', 'frames_rate', 'loop_frame',
-                  'extra_data', 'song_name', 'author_name', 'song_comment'):
+        for k in ('id', 'str_version', 'total_samples', 
+                  'track_name', 'game_name', 'system_name','author_name', 'date'):
             print("{}: {}".format(k, self.__header[k]))
 
+        snd_chips = {
+            'clk_sn76489' : 'SN_76489', 
+            'clk_ym2413' : 'YM_2413', 
+            'clk_ay8910' : 'AY_3_8910'
+            }
+        print ('Sound chip: ', end='')
+        for key, snd_chip in snd_chips.items():
+            if self.__header[key]:
+                print('[', end='')
+                print(snd_chip, end='')
+                print('] ', end='')
+    
+    def dump_data(self):
+        toHex = lambda x: "".join("{:02X} ".format(c) for c in x)
+        print (toHex (self.__data))        
+       
     def get_header(self):
         return self.__header
 
     def get_data(self):
         if not self.__data:
-            self.__read_data()
-            self.__check_eof()
+            self.__read_data()            
         return self.__data
 
 
@@ -150,19 +169,21 @@ def main():
             vgm = VGMReader(fd)
             vgm.dump_header()
             header = vgm.get_header()
-            data = vgm.get_data()
-            print (header)
+            #data = vgm.get_data()
+    else:
 
-    with open(sys.argv[2], 'rb') as fd:
-        vgm = vgmReader(fd)
-        vgm.dump_header()
-        header = vgm.get_header()
-        data = vgm.get_data()
-        print(header)
+        with open(sys.argv[2], 'rb') as fd:
+            vgm = VGMReader(fd)
+            vgm.dump_header()
+            header = vgm.get_header()
+            #data = vgm.get_data()
 
-    song_min, song_sec = to_minsec(header['nb_frames'], header['frames_rate'])
+    vgm.dump_data()
+
+    song_min, song_sec = to_minsec(header['total_samples'], 44100)    
     print("")
 
+'''
     with serial.Serial(sys.argv[1], BAUD) as ser:
         time.sleep(2)  # Wait for Arduino reset
         frame_t = time.time()
@@ -189,6 +210,7 @@ def main():
             # Clear vgm2149 registers
             ser.write(16)       # Write 16 bytes set to 0x00
             print("")
+'''
 
 
 if __name__ == '__main__':
